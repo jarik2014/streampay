@@ -8,7 +8,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "npm run build && node dist/index.js",
     "build": "tsc --outDir dist",
-    "test": "npm run build && node --test dist/decoder.test.js dist/store.test.js dist/indexer.test.js",
+    "test": "npm run build && node --test dist/decoder.test.js dist/store.test.js dist/indexer.test.js dist/chaos.test.js",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

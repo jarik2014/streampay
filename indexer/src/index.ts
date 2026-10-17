@@ -2,7 +2,7 @@ import express from "express";
 import { nativeToScVal } from "@stellar/stellar-sdk";
 import { decodeEvent } from "./decoder.js";
 import { StreamStore } from "./store.js";
-import type { RpcEvent } from "./types.js";
+import { pollOnce, type EventsPage, type LedgerReader } from "./poll.js";
 
 export function createApp(store: StreamStore): express.Express {
   const app = express();
@@ -85,33 +85,26 @@ export async function run(): Promise<void> {
     return body.result;
   }
 
-  interface EventsResult {
-    events: RpcEvent[];
-    cursor: string;
-    latestLedger: number;
-  }
+  // The loop lives in ./poll.ts so the chaos suite (#223) can drive it with a
+  // misbehaving ledger; here we only bind it to the real RPC and the store.
+  const reader: LedgerReader = {
+    getEvents: (params) => rpc<EventsPage>("getEvents", params),
+    getLatestLedger: () => rpc<{ sequence: number }>("getLatestLedger", {}),
+  };
 
   async function poll(): Promise<void> {
-    let cursor = store.getState("cursor");
-    let startLedger: number | undefined;
-    if (!cursor) {
-      const configured = process.env.START_LEDGER;
-      if (configured && !/^\d+$/.test(configured)) throw new Error("START_LEDGER must be an integer ledger sequence");
-      startLedger = configured ? Number(configured) : (await rpc<{ sequence: number }>("getLatestLedger", {})).sequence;
+    const configured = process.env.START_LEDGER;
+    if (!store.getState("cursor") && configured && !/^\d+$/.test(configured)) {
+      throw new Error("START_LEDGER must be an integer ledger sequence");
     }
-    for (;;) {
-      const params = {
-        ...(cursor ? { cursor } : { startLedger }),
-        filters: [{ type: "contract", contractIds: [contractId], topics: topicFilters }],
-        pagination: { limit: 1000 },
-        xdrFormat: "base64",
-      };
-      const page = await rpc<EventsResult>("getEvents", params);
-      const nextCursor = page.cursor || cursor;
-      store.ingestPage(page.events.map(decodeEvent), nextCursor, page.latestLedger);
-      cursor = nextCursor;
-      if (page.events.length < 1000 || !cursor) break;
-    }
+    await pollOnce(reader, store, {
+      startLedger: configured ? Number(configured) : undefined,
+      filters: [{ type: "contract", contractIds: [contractId], topics: topicFilters }],
+      decode: decodeEvent,
+      // Non-final RPC conditions are reported, not thrown: one stuck page must
+      // not stop the indexer from polling again on the next tick.
+      onAlert: (alert) => console.warn(`Indexer ledger anomaly (${alert.kind}): ${alert.detail}`),
+    });
   }
 
   app.listen(port, () => console.log(`StreamPay indexer listening on http://localhost:${port}`));
